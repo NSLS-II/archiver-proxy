@@ -1,3 +1,4 @@
 caproto
 httpx
 numpy
+pyyaml

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-import ast
+import datetime
+from itertools import count
+from pathlib import Path
+import urllib
 
-from caproto import ChannelType
-from caproto.server import PVGroup, ioc_arg_parser, pvproperty, run
+from dateutil import parser, tz
+from dateutil.relativedelta import relativedelta
+import yaml
+
+from caproto.server import PVGroup, template_arg_parser, pvproperty, run, SubGroup
 import httpx
 import numpy as np
 
@@ -28,31 +34,79 @@ async def get_data(url, keys=KEYS):
     return out
 
 
+def format_url(base: str, pv: str, since: datetime.datetime, until: datetime.datetime):
+    query = {
+        "pv": f"optimized_800({pv})",
+        "from": since.isoformat(),
+        "to": until.isoformat(),
+        "fetchLatestMetadata": True,
+    }
+    return f"{base}/retrieval/data/getData.json?{urllib.parse.urlencode(query)}"
+
+
 class ArchiverProxy(PVGroup):
-    # TODO make this configurable and a template
-    url = ""
+    base_url: str
+    target_pv: str
     # TODO do all of the keys
-    mean = pvproperty(name=":archived_24hr_mean", dtype=float, max_length=2000)
-    time = pvproperty(name=":archived_24hr_timebase", dtype=float, max_length=2000)
+    mean = pvproperty(name=":archived_24hr_mean", dtype=float, max_length=850, value=[])
+    time = pvproperty(
+        name=":archived_24hr_timebase", dtype=float, max_length=850, value=[]
+    )
 
     read_count = pvproperty(name=":read_counter", dtype=int, value=0)
 
-    @read_count.scan(period=5)
+    def __init__(self, base_url: str, pv: str, **kwargs):
+        # escape to avoid the macro code
+        super().__init__(**kwargs)
+        self.base_url = base_url
+        self.target_pv = pv
+
+    @read_count.scan(period=60)
     async def read_count(self, instance, async_lib):
-        print("about to hit archiver!")
-        payload = await get_data(self.url)
-        for k in KEYS:
+        payload = await get_data(self.get_current_url())
+        for k in KEYS + ("time",):
             if k not in ("time", "mean"):
                 continue
             await getattr(self, k).write(payload[k])
         await instance.write(instance.value + 1)
 
+    def get_current_url(self):
+
+        now = datetime.datetime.now(tz.UTC)
+        then = now + relativedelta(days=-1)
+
+        return format_url(self.base_url, self.target_pv, then, now)
+
 
 if __name__ == "__main__":
-    ioc_options, run_options = ioc_arg_parser(
+    parser, split_args = template_arg_parser(
         default_prefix="",
         desc="Proxy queries to the archiver to a wavefrom for phebous web.",
     )
 
-    ioc = ArchiverProxy(**ioc_options)
+    parser.add_argument(
+        "--config", help="path to configrutaion file to use", required=True, type=Path
+    )
+
+    args = parser.parse_args()
+    ioc_options, run_options = split_args(args)
+    print(args.config)
+    with open(args.config, "r") as fin:
+        config = list(yaml.safe_load(fin.read()))
+
+    pv_count = count()
+    body = {}
+    print(config)
+    for archiver in config:
+        for j, pv in zip(pv_count, archiver["pvs"]):
+
+            body[f"pv{j}"] = SubGroup(
+                ArchiverProxy,
+                base_url=archiver["archiver_url"],
+                pv=pv,
+                prefix=pv.replace("{", "{{").replace("}", "}}"),
+            )
+    IOCClass = type("IOCClass", (PVGroup,), body)
+
+    ioc = IOCClass(**ioc_options)
     run(ioc.pvdb, **run_options)
