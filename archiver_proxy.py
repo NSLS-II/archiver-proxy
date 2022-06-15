@@ -48,18 +48,20 @@ class ArchiverProxy(PVGroup):
     base_url: str
     target_pv: str
     # TODO do all of the keys
-    mean = pvproperty(name=":archived_24hr_mean", dtype=float, max_length=850, value=[])
+    mean = pvproperty(
+        name=":archived_{window}_mean", dtype=float, max_length=850, value=[]
+    )
     time = pvproperty(
-        name=":archived_24hr_timebase", dtype=float, max_length=850, value=[]
+        name=":archived_{window}_timebase", dtype=float, max_length=850, value=[]
     )
 
     read_count = pvproperty(name=":read_counter", dtype=int, value=0)
 
-    def __init__(self, base_url: str, pv: str, **kwargs):
-        # escape to avoid the macro code
+    def __init__(self, base_url: str, pv: str, window: int, **kwargs):
         super().__init__(**kwargs)
         self.base_url = base_url
         self.target_pv = pv
+        self.window_in_hours = window
 
     @read_count.scan(period=60)
     async def read_count(self, instance, async_lib):
@@ -73,7 +75,7 @@ class ArchiverProxy(PVGroup):
     def get_current_url(self):
 
         now = datetime.datetime.now(tz.UTC)
-        then = now + relativedelta(days=-1)
+        then = now + relativedelta(hours=-self.window_in_hours)
 
         return format_url(self.base_url, self.target_pv, then, now)
 
@@ -98,13 +100,15 @@ if __name__ == "__main__":
     body = {}
     print(config)
     for archiver in config:
-        for j, pv in zip(pv_count, archiver["pvs"]):
+        for j, pv_spec in zip(pv_count, archiver["pvs"]):
 
             body[f"pv{j}"] = SubGroup(
                 ArchiverProxy,
                 base_url=archiver["archiver_url"],
-                pv=pv,
-                prefix=pv.replace("{", "{{").replace("}", "}}"),
+                pv=pv_spec["name"],
+                prefix=pv_spec["name"].replace("{", "{{").replace("}", "}}"),
+                macros={"window": f'{pv_spec["window"]}h'},
+                window=pv_spec["window"],
             )
     IOCClass = type("IOCClass", (PVGroup,), body)
 
