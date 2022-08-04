@@ -28,8 +28,11 @@ async def get_data(url, keys=KEYS):
     # transpose the data
     for j, step in enumerate(payload["data"]):
         out["time"][j] = step["secs"]
-        for k, v in zip(keys, step["val"]):
-            out[k][j] = v
+        if isinstance(step["val"], float):
+            out['mean'][j] = step["val"]
+        else:
+            for k, v in zip(keys, step["val"]):
+                out[k][j] = v
 
     return out
 
